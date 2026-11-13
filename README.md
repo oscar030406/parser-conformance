@@ -104,7 +104,7 @@ When `max_tokens` cuts an output in the middle of a tool call, no complete call 
 | `ernie45` | 9 | 0 | 69 |
 | `deepseek_v3` | 14 | 36 | 131 |
 
-Rows with a cell that is neither of the three cases (`policy_other`) are omitted from the counts.
+Cuts that match none of the three cases (`policy_other`) are not counted. The question of which behavior is intended is open as [vllm#67513](https://github.com/vllm-project/vllm/issues/67513).
 
 ## Checking the tool
 
