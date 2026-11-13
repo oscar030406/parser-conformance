@@ -106,6 +106,24 @@ When `max_tokens` cuts an output in the middle of a tool call, no complete call 
 
 Cuts that match none of the three cases (`policy_other`) are not counted. The question of which behavior is intended is open as [vllm#67513](https://github.com/vllm-project/vllm/issues/67513).
 
+## Comparing with vLLM's Rust frontend
+
+vLLM is porting its parsers to a Rust frontend in `rust/src/parser`. [`rust/parser_diff.rs`](rust/parser_diff.rs) is a small program for vLLM's `rust/src/chat` crate. It reads the recorded outputs and runs the Rust parser of the same name on each one. It feeds the text through the tokenizer and the incremental decoder, as the frontend does. `parser_conformance.rust_diff` then compares the Rust results with the Python ones.
+
+```bash
+cp rust/parser_diff.rs /path/to/vllm/rust/src/chat/examples/
+(cd /path/to/vllm/rust && cargo build -p vllm-chat --example parser_diff)
+# from the vLLM checkout, record the outputs with the Python results
+PYTHONPATH=$PWD:/path/to/parser-conformance PC_REPORT=/tmp/pc.jsonl PC_SEEDS_OUT=/tmp/seeds.jsonl     python -m pytest tests/tool_parsers -n 8 -p parser_conformance.plugin -q
+python -m parser_conformance.rust_diff rust/target/debug/examples/parser_diff /tmp/seeds.jsonl*
+```
+
+On `191e5d5`, 50 recorded outputs have a parser in both implementations and a `tokenizer.json` in the local cache. 30 of them parse the same. The 20 differences come from three choices on the Rust side, each deliberate:
+
+- When a cut leaves an unfinished call, the Rust parser's `finish()` reports it, and the frontend drops the unfinished markup. The Python parsers of the same names return the cut output as content. See [vllm#67513](https://github.com/vllm-project/vllm/issues/67513).
+- The Rust DeepSeek V3 parser ignores text after `<｜tool▁calls▁end｜>`, and its tests assert this. Python keeps that text.
+- Rust's `glm45` expects a newline after the function name. In Python, `glm45` is another name for the GLM-4.7 parser, which also accepts output without it.
+
 ## Checking the tool
 
 The bugs above serve as controls. On a commit that has a bug, its row must show findings. On a commit with the fix, the row must show none:

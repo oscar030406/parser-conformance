@@ -141,6 +141,14 @@ def pytest_sessionfinish(session, exitstatus):
     )
     for line in _IMPORT_ERRORS:
         print(f"[parser-conformance] not imported: {line}")
+    seeds_out = os.environ.get("PC_SEEDS_OUT")
+    if seeds_out:
+        from parser_conformance.export import export_seeds
+
+        if worker:
+            seeds_out = f"{seeds_out}.{worker}"
+        count = export_seeds(_SEEDS, seeds_out)
+        print(f"[parser-conformance] exported {count} tool seeds -> {seeds_out}")
     if errors:
         print("\n".join(errors))
         raise RuntimeError(f"parser-conformance: {len(errors)} seeds broke the harness")
