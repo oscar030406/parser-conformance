@@ -118,11 +118,13 @@ PYTHONPATH=$PWD:/path/to/parser-conformance PC_REPORT=/tmp/pc.jsonl PC_SEEDS_OUT
 python -m parser_conformance.rust_diff rust/target/debug/examples/parser_diff /tmp/seeds.jsonl*
 ```
 
-On `191e5d5`, 50 recorded outputs have a parser in both implementations and a `tokenizer.json` in the local cache. 30 of them parse the same. The 20 differences come from three choices on the Rust side, each deliberate:
+On `191e5d5`, 50 recorded outputs have a parser in both implementations and a `tokenizer.json` in the local cache. 30 of them parse the same. 17 of the 20 differences come from three choices on the Rust side, each deliberate:
 
 - When a cut leaves an unfinished call, the Rust parser's `finish()` reports it, and the frontend drops the unfinished markup. The Python parsers of the same names return the cut output as content. See [vllm#67513](https://github.com/vllm-project/vllm/issues/67513).
 - The Rust DeepSeek V3 parser ignores text after `<｜tool▁calls▁end｜>`, and its tests assert this. Python keeps that text.
 - Rust's `glm45` expects a newline after the function name. In Python, `glm45` is another name for the GLM-4.7 parser, which also accepts output without it.
+
+In the other 3, from `phi4_mini_json` and `granite4`, the Python parser returns no call for output that the Rust parser parses. They are not examined yet.
 
 ## Checking the tool
 
