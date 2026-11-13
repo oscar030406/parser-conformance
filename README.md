@@ -80,7 +80,8 @@ Run on `191e5d5` (2026-11-13). The tool-call tests take 3 minutes with `-n 8`, a
 | `ernie45` | Same as above | `I1_flag`, `I2_text` | [vllm#65346](https://github.com/vllm-project/vllm/pull/65346) |
 | `internlm2` | Malformed JSON raises `JSONDecodeError` | `raises_trunc` | [vllm#50078](https://github.com/vllm-project/vllm/pull/50078) |
 | `deepseek_r1` (`BaseThinkingReasoningParser`) | Text before `<think>` is dropped | `R1_prefix` | [vllm#50901](https://github.com/vllm-project/vllm/issues/50901) |
-| `hunyuan_a13b` | Text after `</answer>`, and text before `<think>` when `</answer>` is missing, is dropped | `R1_suffix`, `R1_prefix` | not reported yet |
+| `hunyuan_a13b` | Text before `<think>` is dropped when `</answer>` is missing | `R1_prefix` | [vllm#67509](https://github.com/vllm-project/vllm/pull/67509) (fix) |
+| `hunyuan_a13b` | Text after `</answer>` is dropped | `R1_suffix` | not reported yet |
 
 The two fixes linked above remove their findings. On the fix branches, `I1_flag` and `I2_text` drop to 0 for `deepseek_v31` and `hy_v3`.
 
