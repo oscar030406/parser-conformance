@@ -98,7 +98,7 @@ python -m parser_conformance.summarize /tmp/neg.jsonl   # no I1_flag or I2_text 
 
 ## Limitations
 
-- Coverage follows vLLM's tests. A parser with no test, or a test that uses a `MagicMock` tokenizer, is skipped and reported as `skip_tokenize`.
+- Coverage follows vLLM's tests. A parser with no test is not checked. When a test builds the parser with a stand-in tokenizer, such as a `MagicMock` with an empty vocabulary, streaming cannot see the marker token ids, so the plugin runs only the full-output and prefix checks and reports `skip_mock_tokenizer`. On `191e5d5`, 16 tool-parser test files do this.
 - A finding is a candidate, not a verdict. Some differences are documented design:
   - `minicpm5_xml` drops content on purpose when it parses a call, and its tests assert this.
   - The `gemma4` reasoning tests expect different results per mode for output without a start marker.

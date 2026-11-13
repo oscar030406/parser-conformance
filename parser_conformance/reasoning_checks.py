@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import random
 
-from parser_conformance.checks import MAX_CUTS, PREFIX, _markers, _norm, _strip
+from parser_conformance.checks import MAX_CUTS, PREFIX, _markers, _norm, _strip, token_deltas
 
 SUFFIX = " Thanks for asking."
 
@@ -50,8 +50,6 @@ def _stream_states(parser, deltas: list[str]) -> list[tuple]:
 
 
 def check_reasoning_seed(parser, text: str, request) -> list[dict]:
-    from tests.tool_parsers.utils import split_string_into_token_deltas
-
     findings: list[dict] = []
     markers = _markers(parser)
 
@@ -77,13 +75,8 @@ def check_reasoning_seed(parser, text: str, request) -> list[dict]:
                 {"check": check, "input": variant, "reasoning": reasoning, "content": content}
             )
 
-    try:
-        deltas = split_string_into_token_deltas(parser.model_tokenizer, text)
-    except Exception as e:  # noqa: BLE001  test-provided tokenizer, e.g. a Mock
-        findings.append({"check": "skip_tokenize", "input": text, "error": repr(e)[:200]})
-        return findings
-    if not all(isinstance(d, str) for d in deltas):  # a MagicMock tokenizer
-        findings.append({"check": "skip_tokenize", "input": text, "error": "non-str pieces"})
+    deltas = token_deltas(parser, text, findings)
+    if deltas is None:
         return findings
     if not deltas or "_pc_init" not in vars(parser):
         findings.append({"check": "skip_fresh", "input": text})

@@ -78,11 +78,32 @@ def _calls_key(calls) -> list[tuple[str, str]]:
     ]
 
 
+def token_deltas(parser, text: str, findings: list[dict]) -> list[str] | None:
+    """Split text into the token pieces that streaming would see.
+
+    Returns None, and records why, when the test built the parser with a
+    stand-in tokenizer. Such a tokenizer has no real vocabulary, so the
+    token ids that streaming parsers match on are missing.
+    """
+    from tests.tool_parsers.utils import split_string_into_token_deltas
+
+    vocab = getattr(parser, "vocab", None)
+    if not isinstance(vocab, dict) or len(vocab) < 1000:
+        findings.append({"check": "skip_mock_tokenizer", "input": text})
+        return None
+    try:
+        deltas = split_string_into_token_deltas(parser.model_tokenizer, text)
+    except Exception as e:  # noqa: BLE001  test-provided tokenizer, e.g. a Mock
+        findings.append({"check": "skip_tokenize", "input": text, "error": repr(e)[:200]})
+        return None
+    if not all(isinstance(d, str) for d in deltas):
+        findings.append({"check": "skip_tokenize", "input": text, "error": "non-str pieces"})
+        return None
+    return deltas
+
+
 def check_seed(parser, text: str, request) -> list[dict]:
-    from tests.tool_parsers.utils import (
-        run_tool_extraction_streaming,
-        split_string_into_token_deltas,
-    )
+    from tests.tool_parsers.utils import run_tool_extraction_streaming
 
     findings: list[dict] = []
     markers = _markers(parser)
@@ -118,13 +139,8 @@ def check_seed(parser, text: str, request) -> list[dict]:
         if PREFIX.strip() not in (info.content or ""):
             findings.append({"check": "prefix_lost", "input": prefixed, "result": _summary(info)})
 
-    try:
-        deltas = split_string_into_token_deltas(parser.model_tokenizer, text)
-    except Exception as e:  # noqa: BLE001  test-provided tokenizer, e.g. a Mock
-        findings.append({"check": "skip_tokenize", "input": text, "error": repr(e)[:200]})
-        return findings
-    if not all(isinstance(d, str) for d in deltas):  # a MagicMock tokenizer
-        findings.append({"check": "skip_tokenize", "input": text, "error": "non-str pieces"})
+    deltas = token_deltas(parser, text, findings)
+    if deltas is None:
         return findings
 
     cuts = list(range(1, len(deltas)))
