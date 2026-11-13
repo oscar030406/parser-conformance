@@ -85,6 +85,27 @@ Run on `191e5d5` (2026-11-13). The tool-call tests take 3 minutes with `-n 8`, a
 
 The two fixes linked above remove their findings. On the fix branches, `I1_flag` and `I2_text` drop to 0 for `deepseek_v31` and `hy_v3`.
 
+## Truncated tool calls
+
+When `max_tokens` cuts an output in the middle of a tool call, no complete call is left, and vLLM's parsers disagree on what non-streaming returns as `content`. The plugin records this as `policy_*` rows instead of failures. Each count below is a number of cut positions on `191e5d5`:
+
+| `--tool-call-parser` | keeps the cut output | keeps only the text before the call | returns no content |
+|---|---|---|---|
+| `xlam`, `lfm2`, `longcat`, `jamba`, `pythonic`, `olmo3`, `phi4_mini_json`, `granite-20b-fc`, `granite4`, `hermes`, `step3`, `internlm` | all | 0 | 0 |
+| `llama4_pythonic` | 113 | 0 | 0 |
+| `gigachat3` | 182 | 3 | 3 |
+| `kimi_k2` | 54 | 36 | 0 |
+| `qwen3_coder`, `qwen3_xml` | 24 | 12 | 5 |
+| `step3p5` | 24 | 15 | 5 |
+| `granite` | 24 | 0 | 33 |
+| `glm45`, `glm47` | 4 | 3 | 14 |
+| `hy_v3` | 2 | 6 | 14 |
+| `deepseek_v31` | 5 | 18 | 26 |
+| `ernie45` | 9 | 0 | 69 |
+| `deepseek_v3` | 14 | 36 | 131 |
+
+Rows with a cell that is neither of the three cases (`policy_other`) are omitted from the counts.
+
 ## Checking the tool
 
 The bugs above serve as controls. On a commit that has a bug, its row must show findings. On a commit with the fix, the row must show none:

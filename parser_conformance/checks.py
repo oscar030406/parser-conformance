@@ -78,6 +78,27 @@ def _calls_key(calls) -> list[tuple[str, str]]:
     ]
 
 
+def _cut_policy(prefix: str, content: str | None, markers: list[str]) -> dict:
+    """Record what non-streaming returns when a cut leaves no complete call.
+
+    This is an observation, not a pass or fail: vLLM's parsers disagree here.
+    "policy_keeps_text" returns the cut output as content, "policy_drops_call"
+    keeps only the text before the first marker, "policy_drops_all" returns no
+    content.
+    """
+    starts = [i for i in (prefix.find(m) for m in markers) if i >= 0]
+    before = prefix[: min(starts)] if starts else prefix
+    if _norm(content) == _norm(prefix):
+        kind = "keeps_text"
+    elif _norm(content) == _norm(before) and _norm(before):
+        kind = "drops_call"
+    elif not _norm(content):
+        kind = "drops_all"
+    else:
+        kind = "other"
+    return {"check": f"policy_{kind}", "input": prefix, "content": content}
+
+
 def token_deltas(parser, text: str, findings: list[dict]) -> list[str] | None:
     """Split text into the token pieces that streaming would see.
 
@@ -154,6 +175,8 @@ def check_seed(parser, text: str, request) -> list[dict]:
             findings.append({"check": "raises_trunc", "input": prefix, "error": repr(e)[:200]})
             continue
         judge(prefix, info, "_trunc")
+        if base.tool_calls and not info.tool_calls:
+            findings.append(_cut_policy(prefix, info.content, markers))
 
     if "_pc_init" not in vars(parser):
         findings.append({"check": "skip_fresh", "input": text})
