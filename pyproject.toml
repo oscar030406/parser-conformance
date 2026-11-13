@@ -1,0 +1,18 @@
+[project]
+name = "parser-conformance"
+version = "0.1.0"
+description = "Record-and-mutate conformance checks for the tool-call parsers of LLM serving engines"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+dependencies = []
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "BLE", "S110", "S112", "PGH", "UP"]
