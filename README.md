@@ -1,6 +1,6 @@
 # parser-conformance
 
-parser-conformance finds bugs in the tool-call and reasoning parsers of [vLLM](https://github.com/vllm-project/vllm). It records every model output that vLLM's own parser tests pass to a parser, changes each output in ways that real traffic does, and checks properties that every parser should keep.
+parser-conformance finds bugs in the tool-call and reasoning parsers of [vLLM](https://github.com/vllm-project/vllm). It records every model output that vLLM's own parser tests pass to a parser. It then changes each output in ways that real traffic does, and checks properties that every parser should keep.
 
 vLLM has about 60 tool-call parsers and 40 reasoning parsers, one or more per model family. Each parser has its own hand-written tests, and on vLLM `main` at `191e5d5` only 8 of the 38 tool-parser test files use the shared test suite in `tests/tool_parsers/common_tests.py`. The same kind of bug therefore shows up in parser after parser. This plugin applies one set of checks to every parser that has tests, with no per-parser configuration.
 
@@ -8,8 +8,8 @@ vLLM has about 60 tool-call parsers and 40 reasoning parsers, one or more per mo
 
 1. A pytest plugin wraps `extract_tool_calls` and `extract_reasoning` on every parser class. While vLLM's tests run, it records each parser instance, the model output it received, and the request.
 2. After the tests finish, it checks each recorded output, plus these variants of it:
-   - each token-boundary prefix, which is what a `max_tokens` cut produces;
-   - the output with a plain sentence put in front of it or after it;
+   - each token-boundary prefix, which is what a `max_tokens` cut produces
+   - the output with a plain sentence put in front of it or after it
    - the output fed token by token through the streaming path.
 
 Tool-call parsers:
@@ -17,7 +17,7 @@ Tool-call parsers:
 | Check | Property |
 |---|---|
 | `I1_flag` | `tools_called` is true exactly when `tool_calls` is non-empty. |
-| `I2_text` | When no call is parsed, `content` keeps the model output. |
+| `I2_text` | When the parser finds no call, `content` keeps the model output. |
 | `I3_calls`, `I3_content` | Streaming gives the same calls and content as non-streaming. |
 | `prefix_lost`, `prefix_calls` | A sentence in front of the output reaches `content` and leaves the calls unchanged. |
 | `S_state` | After all the variants, the same parser instance parses the original output as it did first. |
@@ -26,7 +26,7 @@ Reasoning parsers:
 
 | Check | Property |
 |---|---|
-| `R1_prefix`, `R1_suffix` | A sentence in front of or after the output is kept, in reasoning or in content. |
+| `R1_prefix`, `R1_suffix` | The parser keeps a sentence in front of or after the output, in reasoning or in content. |
 | `R2_stream` | Streaming gives the same reasoning and content as non-streaming. |
 | `R2_trunc` | The same holds at every token-boundary prefix. |
 
@@ -80,15 +80,15 @@ Run on `191e5d5` (2026-11-13). The tool-call tests take 3 minutes with `-n 8`, a
 | `deepseek_v3` | Same as above | `I1_flag`, `I2_text` | [vllm#48367](https://github.com/vllm-project/vllm/pull/48367) |
 | `ernie45` | Same as above | `I1_flag`, `I2_text` | [vllm#65346](https://github.com/vllm-project/vllm/pull/65346) |
 | `internlm2` | Malformed JSON raises `JSONDecodeError` | `raises_trunc` | [vllm#50078](https://github.com/vllm-project/vllm/pull/50078) |
-| `deepseek_r1` (`BaseThinkingReasoningParser`) | Text before `<think>` is dropped | `R1_prefix` | [vllm#50901](https://github.com/vllm-project/vllm/issues/50901) |
-| `hunyuan_a13b` | Text before `<think>` is dropped when `</answer>` is missing | `R1_prefix` | [vllm#67509](https://github.com/vllm-project/vllm/pull/67509) (fix) |
-| `hunyuan_a13b` | Text after `</answer>` is dropped | `R1_suffix` | not reported yet |
+| `deepseek_r1` (`BaseThinkingReasoningParser`) | Drops the text before `<think>` | `R1_prefix` | [vllm#50901](https://github.com/vllm-project/vllm/issues/50901) |
+| `hunyuan_a13b` | Drops the text before `<think>` when `</answer>` is missing | `R1_prefix` | [vllm#67509](https://github.com/vllm-project/vllm/pull/67509) (fix) |
+| `hunyuan_a13b` | Drops the text after `</answer>` | `R1_suffix` | not reported yet |
 
 The two fixes linked above remove their findings. On the fix branches, `I1_flag` and `I2_text` drop to 0 for `deepseek_v31` and `hy_v3`.
 
 ## Truncated tool calls
 
-When `max_tokens` cuts an output in the middle of a tool call, no complete call is left, and vLLM's parsers disagree on what non-streaming returns as `content`. The plugin records this as `policy_*` rows instead of failures. Each count below is a number of cut positions on `191e5d5`:
+When `max_tokens` cuts an output in the middle of a tool call, no complete call remains. vLLM's parsers then disagree on what non-streaming returns as `content`. The plugin records this as `policy_*` rows instead of failures. Each count below is a number of cut positions on `191e5d5`:
 
 | `--tool-call-parser` | keeps the cut output | keeps only the text before the call | returns no content |
 |---|---|---|---|
@@ -105,7 +105,7 @@ When `max_tokens` cuts an output in the middle of a tool call, no complete call 
 | `ernie45` | 9 | 0 | 69 |
 | `deepseek_v3` | 14 | 36 | 131 |
 
-Cuts that match none of the three cases (`policy_other`) are not counted. The question of which behavior is intended is open as [vllm#67513](https://github.com/vllm-project/vllm/issues/67513).
+Cuts that match none of the three cases (`policy_other`) are not counted. Which behavior vLLM intends is the open question in [vllm#67513](https://github.com/vllm-project/vllm/issues/67513).
 
 ## Comparing with vLLM's Rust frontend
 
@@ -131,7 +131,7 @@ The export builds a fresh Python parser for each output, and it sends the tool s
 
 ## Streaming cost
 
-Set `PC_PERF=1` to time streaming as an output grows. For each tool parser, the plugin takes its longest recorded output and puts 256 or 1024 tokens of plain text into the first JSON string value, or in front of the output when it has none. A fresh parser then streams each version token by token. A time ratio near 4 means constant work per token. A ratio near 16 means every token rescans the whole text.
+Set `PC_PERF=1` to time streaming as an output grows. For each tool parser, the plugin takes its longest recorded output. It puts 256 or 1024 tokens of plain text into the first JSON string value, or in front of the output when it has none. A fresh parser then streams each version token by token. A time ratio near 4 means constant work per token. A ratio near 16 means every token rescans the whole text.
 
 ```bash
 PYTHONPATH=$PWD:/path/to/parser-conformance PC_PERF=1 PC_PERF_OUT=/tmp/perf.jsonl PC_MAX_CUTS=1     python -m pytest tests/tool_parsers -n 8 -p parser_conformance.plugin -q
@@ -152,13 +152,13 @@ python -m parser_conformance.summarize /tmp/neg.jsonl   # no I1_flag or I2_text 
 
 ## Limitations
 
-- Coverage follows vLLM's tests. A parser with no test is not checked. When a test builds the parser with a stand-in tokenizer, such as a `MagicMock` with an empty vocabulary, streaming cannot see the marker token ids, so the plugin runs only the full-output and prefix checks and reports `skip_mock_tokenizer`. On `191e5d5`, 16 tool-parser test files do this.
-- A finding is a candidate, not a verdict. Some differences are documented design:
+- Coverage follows vLLM's tests. A parser with no test is not checked. Some tests build the parser with a stand-in tokenizer, such as a `MagicMock` with an empty vocabulary. Streaming then cannot see the marker token ids, so the plugin runs only the full-output and prefix checks and reports `skip_mock_tokenizer`. On `191e5d5`, 16 tool-parser test files do this.
+- A finding is a candidate, not a verdict. vLLM documents some differences as design:
   - `minicpm5_xml` drops content on purpose when it parses a call, and its tests assert this.
   - The `gemma4` reasoning tests expect different results per mode for output without a start marker.
-  - Incremental streaming cannot take back a call it has started. JSON that never closes therefore becomes a call only in streaming, which the plugin reports as `I3_lenient`.
+  - Incremental streaming cannot take back a call that it started. JSON that never closes therefore becomes a call only in streaming, which the plugin reports as `I3_lenient`.
 - `I2_text` ignores special tokens, `*_token` attributes of the parser, and tag-like strings such as `<answer>`. It does not know marker phrases such as Granite's `Here is my thought process:`, which is why the reasoning checks only compare a parser with itself.
-- The streaming state is compared without an end-of-stream flush. Most `R2_trunc` findings are a parser holding back the start of a possible marker at the cut, for example `<th` or Granite's `Here`, which non-streaming returns as content.
+- The plugin compares the streaming state without an end-of-stream flush. Most `R2_trunc` findings are a parser holding back the start of a possible marker at the cut, for example `<th` or Granite's `Here`, which non-streaming returns as content.
 
 ## License
 
