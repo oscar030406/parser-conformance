@@ -2,3 +2,9 @@ __pycache__/
 *.egg-info/
 .venv/
 /*.jsonl
+
+# agent files stay local
+CLAUDE.md
+AGENTS.md
+.claude/
+HANDOFF.md
