@@ -129,6 +129,16 @@ The export builds a fresh Python parser for each output, and it sends the tool s
 
 `S_state` reports one parser on `191e5d5`: after a cut output, `granite4` leaves `in_tc` set, and the same instance then returns the next complete call as content. vLLM builds a new parser for each choice, so served requests do not reach this.
 
+## Streaming cost
+
+Set `PC_PERF=1` to time streaming as an output grows. For each tool parser, the plugin takes its longest recorded output and puts 256 or 1024 tokens of plain text into the first JSON string value, or in front of the output when it has none. A fresh parser then streams each version token by token. A time ratio near 4 means constant work per token. A ratio near 16 means every token rescans the whole text.
+
+```bash
+PYTHONPATH=$PWD:/path/to/parser-conformance PC_PERF=1 PC_PERF_OUT=/tmp/perf.jsonl PC_MAX_CUTS=1     python -m pytest tests/tool_parsers -n 8 -p parser_conformance.plugin -q
+```
+
+On `191e5d5`, 22 parsers give ratios from 1.0 to 4.8. `xlam` gives 8.1, from 22 ms to 177 ms: its streaming path runs regular expressions and `json.loads` over the whole text for every token. `ernie45` fails the streaming harness's own assertion, so it has no time.
+
 ## Checking the tool
 
 The bugs above serve as controls. On a commit that has a bug, its row must show findings. On a commit with the fix, the row must show none:

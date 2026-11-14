@@ -149,6 +149,16 @@ def pytest_sessionfinish(session, exitstatus):
             seeds_out = f"{seeds_out}.{worker}"
         count = export_seeds(_SEEDS, seeds_out)
         print(f"[parser-conformance] exported {count} tool seeds -> {seeds_out}")
+    if os.environ.get("PC_PERF"):
+        from parser_conformance.perf import run_perf
+
+        perf_out = os.environ.get("PC_PERF_OUT", "parser_conformance_perf.jsonl")
+        if worker:
+            perf_out = f"{perf_out}.{worker}"
+        with open(perf_out, "w", encoding="utf-8") as f:
+            for row in run_perf(_SEEDS):
+                f.write(json.dumps(row) + "\n")
+        print(f"[parser-conformance] streaming cost -> {perf_out}")
     if errors:
         print("\n".join(errors))
         raise RuntimeError(f"parser-conformance: {len(errors)} seeds broke the harness")
