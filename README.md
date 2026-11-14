@@ -20,6 +20,7 @@ Tool-call parsers:
 | `I2_text` | When no call is parsed, `content` keeps the model output. |
 | `I3_calls`, `I3_content` | Streaming gives the same calls and content as non-streaming. |
 | `prefix_lost`, `prefix_calls` | A sentence in front of the output reaches `content` and leaves the calls unchanged. |
+| `S_state` | After all the variants, the same parser instance parses the original output as it did first. |
 
 Reasoning parsers:
 
@@ -118,13 +119,15 @@ PYTHONPATH=$PWD:/path/to/parser-conformance PC_REPORT=/tmp/pc.jsonl PC_SEEDS_OUT
 python -m parser_conformance.rust_diff rust/target/debug/examples/parser_diff /tmp/seeds.jsonl*
 ```
 
-On `191e5d5`, 50 recorded outputs have a parser in both implementations and a `tokenizer.json` in the local cache. 30 of them parse the same. 17 of the 20 differences come from three choices on the Rust side, each deliberate:
+On `191e5d5`, in one run with `-n 8`, 54 recorded outputs have a parser in both implementations and a `tokenizer.json` in the local cache. 39 of them parse the same. All 15 differences come from three choices on the Rust side, each deliberate:
 
 - When a cut leaves an unfinished call, the Rust parser's `finish()` reports it, and the frontend drops the unfinished markup. The Python parsers of the same names return the cut output as content. See [vllm#67513](https://github.com/vllm-project/vllm/issues/67513).
 - The Rust DeepSeek V3 parser ignores text after `<｜tool▁calls▁end｜>`, and its tests assert this. Python keeps that text.
 - Rust's `glm45` expects a newline after the function name. In Python, `glm45` is another name for the GLM-4.7 parser, which also accepts output without it.
 
-In the other 3, from `phi4_mini_json` and `granite4`, the Python parser returns no call for output that the Rust parser parses. They are not examined yet.
+The export builds a fresh Python parser for each output, and it sends the tool schemas that engine parsers take in `__init__`. Without these, Python and Rust disagree on outputs that both parse the same way.
+
+`S_state` reports one parser on `191e5d5`: after a cut output, `granite4` leaves `in_tc` set, and the same instance then returns the next complete call as content. vLLM builds a new parser for each choice, so served requests do not reach this.
 
 ## Checking the tool
 

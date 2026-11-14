@@ -10,6 +10,8 @@ I3  Streaming the output token by token gives the same calls and content
 
 P   Putting plain text in front of the output keeps the same calls
     ("prefix_calls") and the text reaches content ("prefix_lost").
+S   After all the variants, the same parser instance parses the original
+    output as it did first ("S_state").
 
 I1 and I2 also run on token-boundary prefixes of the input ("_trunc"),
 which is what a max_tokens cut produces.
@@ -177,6 +179,19 @@ def check_seed(parser, text: str, request) -> list[dict]:
         judge(prefix, info, "_trunc")
         if base.tool_calls and not info.tool_calls:
             findings.append(_cut_policy(prefix, info.content, markers))
+
+    # Non-streaming parsing must not depend on earlier calls: after all the
+    # variants, the same instance must parse the original output as before.
+    try:
+        again = parser.extract_tool_calls(text, request)
+    except Exception as e:  # noqa: BLE001  parser under test; recorded as a finding
+        findings.append({"check": "S_state", "input": text, "error": repr(e)[:200]})
+    else:
+        if (_calls_key(again.tool_calls), _norm(again.content)) != (
+            _calls_key(base.tool_calls),
+            _norm(base.content),
+        ):
+            findings.append({"check": "S_state", "input": text, "result": _summary(again)})
 
     if "_pc_init" not in vars(parser):
         findings.append({"check": "skip_fresh", "input": text})

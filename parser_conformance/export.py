@@ -21,8 +21,11 @@ def _registered_names() -> dict[str, list[str]]:
     return names
 
 
-def _tools(request) -> list[dict] | None:
+def _tools(parser, request) -> list[dict] | None:
     tools = getattr(request, "tools", None)
+    if not isinstance(tools, list):  # engine parsers take the tools in __init__
+        args, kwargs = parser._pc_init
+        tools = args[1] if len(args) > 1 else kwargs.get("tools")
     if not isinstance(tools, list):  # a Mock request, or no tools
         return None
     return [tool.model_dump(mode="json", exclude_none=True) for tool in tools]
@@ -35,14 +38,17 @@ def export_seeds(seeds: list[tuple], path: str) -> int:
         for family, parser, text, request, nodeid in seeds:
             if family != "tool":
                 continue
-            info = parser.extract_tool_calls(text, request)
+            # A fresh instance: the checks have already called this one, and
+            # a stateful parser can answer differently after that.
+            args, kwargs = parser._pc_init
+            info = type(parser)(*args, **kwargs).extract_tool_calls(text, request)
             row = {
                 "parser_class": type(parser).__name__,
                 "parser_names": names.get(type(parser).__name__, []),
                 "nodeid": nodeid,
                 "tokenizer": getattr(parser.model_tokenizer, "name_or_path", None),
                 "text": text,
-                "tools": _tools(request),
+                "tools": _tools(parser, request),
                 "python": {
                     "tools_called": info.tools_called,
                     "calls": [
