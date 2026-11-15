@@ -58,8 +58,19 @@ def _tokenizer_name(parser) -> str:
 
 
 def _request_key(request) -> str:
+    # vLLM gives every request a random request_id, which says nothing about the parse.
     dump = getattr(type(request), "model_dump_json", None)
-    return dump(request) if dump else type(request).__name__
+    return dump(request, exclude={"request_id"}) if dump else type(request).__name__
+
+
+def _tools_key(parser) -> str:
+    """The tools that engine parsers take in __init__, e.g. vLLM's Qwen3 coder tests."""
+    args, kwargs = vars(parser).get("_pc_init", ((), {}))
+    tools = args[1] if len(args) > 1 else kwargs.get("tools")
+    if not isinstance(tools, list):
+        return ""
+    dumped = [t.model_dump() if hasattr(t, "model_dump") else repr(t) for t in tools]
+    return json.dumps(dumped, default=str)
 
 
 def _wrap_method(cls, method: str, family: str) -> None:
@@ -75,8 +86,9 @@ def _wrap_method(cls, method: str, family: str) -> None:
             and isinstance(model_output, str)
             and _PER_PARSER[name] < MAX_SEEDS_PER_PARSER
         ):
-            # The same text can mean something else with another tokenizer or request.
-            key = (name, _tokenizer_name(self), _request_key(request), model_output)
+            # The same text can mean something else with another tokenizer, request or tools.
+            where = (_tokenizer_name(self), _request_key(request), _tools_key(self))
+            key = (name, *where, model_output)
             if key not in _SEEN:
                 _SEEN.add(key)
                 _PER_PARSER[name] += 1
@@ -159,7 +171,8 @@ def _check_seeds() -> dict:
     if os.environ.get("PC_SEEDS_OUT"):
         from parser_conformance.export import export_rows
 
-        result["seeds"] = [_line(row) for row in export_rows(seeds)]
+        tool_keys = [_line(seed[5]) for seed in _SEEDS if seed[0] == "tool"]
+        result["seeds"] = dict(zip(tool_keys, map(_line, export_rows(seeds)), strict=True))
     if os.environ.get("PC_PERF"):
         from parser_conformance.perf import run_perf
 
@@ -219,22 +232,32 @@ def pytest_sessionfinish(session, exitstatus):
     def merged(key: str) -> list[str]:
         return [line for result in _RESULTS for line in result.get(key, [])]
 
-    # Two workers can record the same seed. Keep the rows from the earliest
-    # test, as a run without workers would.
+    # Two workers can record the same seed. Keep the rows of the test whose id
+    # sorts first, so that the choice does not depend on which worker ran it.
     groups: dict[str, list[str]] = {}
     for result in _RESULTS:
         for key, lines in result["report"].items():
             if key not in groups or _nodeid(lines) < _nodeid(groups[key]):
                 groups[key] = lines
+    # Each worker records up to PC_MAX_SEEDS per parser. Keep that many in all,
+    # the first by test id.
+    per_parser: Counter[str] = Counter()
+    kept = []
+    for key in sorted(groups, key=lambda k: (_nodeid(groups[k]), k)):
+        parser = json.loads(groups[key][0])["parser"]
+        if per_parser[parser] < MAX_SEEDS_PER_PARSER:
+            per_parser[parser] += 1
+            kept.append(key)
     out = os.environ.get("PC_REPORT", "parser_conformance.jsonl")
-    _write(out, [line for lines in groups.values() for line in lines])
-    seeds = len(groups)
+    _write(out, [line for key in kept for line in groups[key]])
+    seeds = len(kept)
     print(f"\n[parser-conformance] {seeds} seeds checked{took} -> {out}")
     for line in sorted(set(merged("import_errors"))):
         print(f"[parser-conformance] not imported: {line}")
     seeds_out = os.environ.get("PC_SEEDS_OUT")
     if seeds_out:
-        count = _write(seeds_out, _unique_seeds(merged("seeds")))
+        exported = {k: v for result in _RESULTS for k, v in result.get("seeds", {}).items()}
+        count = _write(seeds_out, _unique_seeds([exported[k] for k in kept if k in exported]))
         print(f"[parser-conformance] exported {count} tool seeds -> {seeds_out}")
     if os.environ.get("PC_PERF"):
         perf_out = os.environ.get("PC_PERF_OUT", "parser_conformance_perf.jsonl")

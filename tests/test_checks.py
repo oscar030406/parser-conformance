@@ -4,7 +4,7 @@ import pytest
 from vllm.fake_tokenizer import ByteTokenizer
 from vllm.tool_parsers import demo_tool_parser as demo
 
-from parser_conformance.checks import check_seed
+from parser_conformance.checks import _markers, check_seed
 
 TOKENIZER = ByteTokenizer()
 CALL = '<tool_call>{"name": "f", "arguments": {"a": 1}}</tool_call>'
@@ -50,6 +50,13 @@ def test_call_that_only_streaming_finds_is_a_mismatch():
     assert "I3_lenient" not in found
 
 
+def test_closed_call_that_non_streaming_misses_is_a_mismatch_before_text():
+    # From vLLM's Step3 tests: text follows the closed call.
+    found = failures(demo.MissesCallToolParser(TOKENIZER), f"{CALL} Done.")
+    assert "I3_calls" in found
+    assert "I3_lenient" not in found
+
+
 def test_unfinished_call_that_only_streaming_returns_is_lenient():
     unfinished = '<tool_call>{"name": "f", "arguments": {"a": 1'
     assert failures(demo.PartialArgsToolParser(TOKENIZER), unfinished) == {"I3_lenient"}
@@ -87,3 +94,20 @@ def test_parser_that_needs_the_call_first():
 def test_several_tokens_per_delta():
     found = failures(demo.PerTokenToolParser(TOKENIZER), f"Hi {CALL}")
     assert found == {"I3_calls_chunked", "I3_content_chunked"}
+
+
+def test_marker_before_the_call_does_not_make_a_cut_a_call():
+    # ERNIE writes </think> before its call. A cut right after it holds no call.
+    rows = check_seed(demo.DemoToolParser(TOKENIZER), f"<think>x</think>Hi {CALL}", None)
+    cut_rows = [r for r in rows if r["check"].startswith("policy_")]
+    assert cut_rows
+    assert all("<tool_call>" in r["input"] for r in cut_rows)
+
+
+class DigitVocabTokenizer(ByteTokenizer):
+    def get_added_vocab(self):  # like ERNIE's added vocabulary
+        return {**super().get_added_vocab(), **{str(d): 900 + d for d in range(10)}}
+
+
+def test_lost_digits_are_lost_text():
+    assert "7" not in _markers(demo.DemoToolParser(DigitVocabTokenizer()))

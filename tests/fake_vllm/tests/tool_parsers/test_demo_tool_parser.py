@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from vllm.fake_tokenizer import ByteTokenizer
+from vllm.protocol import ChatCompletionRequest
 from vllm.tool_parsers.demo_tool_parser import DemoToolParser, NoContentToolParser
 
 TOKENIZER = ByteTokenizer()
@@ -37,3 +38,10 @@ class BrokenTokenizer(ByteTokenizer):
 @pytest.mark.skipif(not os.environ.get("PC_TEST_BREAK"), reason="breaks the checks on purpose")
 def test_broken_tokenizer():
     assert DemoToolParser(BrokenTokenizer()).extract_tool_calls(f"Bad {CALL}", None).tools_called
+
+
+# Two tests parse the same output, each with a new request and its own random id.
+@pytest.mark.parametrize("i", range(2))
+def test_same_request_twice(i):
+    request = ChatCompletionRequest(model="m")
+    assert DemoToolParser(TOKENIZER).extract_tool_calls(f"Twice {CALL}", request).tools_called

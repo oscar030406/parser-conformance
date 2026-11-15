@@ -42,6 +42,25 @@ import re
 MAX_CUTS = int(os.environ.get("PC_MAX_CUTS", "48"))
 PREFIX = "Sure, checking now. "
 _TAG = re.compile(r"<[^<>\s\\]{1,40}>")
+_TAG_CHARS = re.compile(r"[<>\[\]|｜]")
+
+
+def _closing(marker: str) -> bool:
+    """A marker that ends a call or a section, e.g. </tool_call> or <｜tool_calls_end｜>."""
+    return marker.startswith("</") or "end" in marker.lower()
+
+
+def _closed(call, text: str, markers: list[str]) -> bool:
+    """Whether a closing marker follows the call's name in the output.
+
+    For formats without closing markers, such as pythonic calls, a call is
+    closed when its arguments are complete JSON.
+    """
+    closing = [m for m in markers if _closing(m)]
+    if not closing:
+        return _complete(call.function.arguments)
+    start = text.find(call.function.name or "")
+    return start >= 0 and any(m in text[start:] for m in closing)
 
 
 def parser_factory(parser):
@@ -76,10 +95,13 @@ def _source_tags(cls) -> frozenset[str]:
 
 def _markers(parser) -> list[str]:
     tokenizer = parser.model_tokenizer
-    found: set[str] = set(getattr(tokenizer, "all_special_tokens", None) or [])
+    vocab: set[str] = set(getattr(tokenizer, "all_special_tokens", None) or [])
     get_added_vocab = getattr(tokenizer, "get_added_vocab", None)
     if callable(get_added_vocab):
-        found.update(get_added_vocab().keys())
+        vocab.update(get_added_vocab().keys())
+    # ERNIE adds the digits and LFM2.5 adds plain words to the vocabulary; only
+    # entries with tag characters are markers.
+    found = {token for token in vocab if _TAG_CHARS.search(token)}
     # Instance attributes, then class attributes such as Step3's TOOL_CALLS_END.
     namespaces = [vars(parser), *(vars(c) for c in type(parser).__mro__ if c is not object)]
     for name, value in (item for space in namespaces for item in space.items()):
@@ -208,8 +230,7 @@ def compare_stream(rec, base, markers: list[str], text: str, tag: str) -> list[d
     findings = []
     if stream != nonstream:
         extra = rec.tool_calls[len(nonstream) :]
-        closed = any(text.rstrip().endswith(m.strip()) for m in markers if m.strip())
-        unfinished = not closed or not any(_complete(c.function.arguments) for c in extra)
+        unfinished = not any(_closed(call, text, markers) for call in extra)
         if stream[: len(nonstream)] == nonstream and unfinished:
             # Incremental streaming emits a call before it can see that the call
             # never closes, and it cannot take the call back.
@@ -268,6 +289,9 @@ def check_seed(parser, text: str, request) -> list[dict]:
     if base is None:
         return findings
     judge(text, base, "")
+    # Markers of the calls: in the output but not in its content. ERNIE's
+    # </think> comes before the call and stays in the content.
+    call_markers = [m for m in markers if m in text and m not in (base.content or "")]
 
     # Text in front of the output must reach content and leave calls alone.
     prefixed = PREFIX + text
@@ -289,10 +313,10 @@ def check_seed(parser, text: str, request) -> list[dict]:
         info = extract(prefix, "raises_trunc")
         if info is None:
             continue
-        if base.tool_calls and not info.tool_calls and any(m in prefix for m in markers):
+        if base.tool_calls and not info.tool_calls and any(m in prefix for m in call_markers):
             # A cut inside a call: vLLM's parsers disagree on the content (vllm#67513).
             judge(prefix, info, "_trunc", content=False)
-            findings.append(_cut_policy(prefix, info.content, markers))
+            findings.append(_cut_policy(prefix, info.content, call_markers))
         else:
             judge(prefix, info, "_trunc")
 
