@@ -187,7 +187,9 @@ class PartialArgsToolParser(DemoToolParser):
         new, self._args_sent = arguments[len(self._args_sent) :], arguments
         if not new:
             return None
-        return DeltaMessage(tool_calls=[DeltaToolCall(index=0, function=DeltaFunctionCall(None, new))])
+        return DeltaMessage(
+            tool_calls=[DeltaToolCall(index=0, function=DeltaFunctionCall(None, new))]
+        )
 
 
 class PerTokenToolParser(DemoToolParser):

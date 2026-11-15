@@ -15,7 +15,12 @@ def checks(parser, text: str) -> set[str]:
 
 @pytest.mark.parametrize(
     "text",
-    ["<think>Plan</think>Answer", "Plan</think>Answer", "<think>Plan", "<think>\U0001f389</think>Ok"],
+    [
+        "<think>Plan</think>Answer",
+        "Plan</think>Answer",
+        "<think>Plan",
+        "<think>\U0001f389</think>Ok",
+    ],
     ids=["both-markers", "end-marker", "no-end", "multibyte"],
 )
 def test_correct_parser_passes(text):

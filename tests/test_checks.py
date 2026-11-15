@@ -55,6 +55,12 @@ def test_unfinished_call_that_only_streaming_returns_is_lenient():
     assert failures(demo.PartialArgsToolParser(TOKENIZER), unfinished) == {"I3_lenient"}
 
 
+def test_call_that_never_closes_is_lenient_even_with_complete_arguments():
+    # From vLLM's Hermes tests: the arguments close, the call markup does not.
+    unclosed = '<tool_call>{"name": "f", "arguments": {"a": 1}}'
+    assert failures(demo.PartialArgsToolParser(TOKENIZER), unclosed) == {"I3_lenient"}
+
+
 def test_marker_in_streamed_content():
     assert failures(demo.LeakyToolParser(TOKENIZER), f"Hi {CALL}") == {"I3_markers"}
 

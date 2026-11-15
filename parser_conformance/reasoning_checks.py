@@ -5,17 +5,26 @@ R1  Plain text added in front of the output ("R1_prefix") or after it
 R2  Streaming the output token by token gives the same reasoning and
     content as non-streaming extraction ("R2_stream"). "R2_trunc" compares
     the two modes on token-boundary prefixes, which is what a max_tokens
-    cut produces.
+    cut produces. "_markers" means the two differ only in special tokens
+    or whitespace.
 
 Both properties compare the parser with itself, so they do not depend on
-knowing each model's marker words.
+knowing each model's marker words. Every parse uses a fresh parser.
 """
 
 from __future__ import annotations
 
 import random
 
-from parser_conformance.checks import MAX_CUTS, PREFIX, _markers, _norm, _strip, token_deltas
+from parser_conformance.checks import (
+    MAX_CUTS,
+    PREFIX,
+    _markers,
+    _norm,
+    _strip,
+    parser_factory,
+    token_deltas,
+)
 
 SUFFIX = " Thanks for asking."
 
@@ -50,70 +59,68 @@ def _stream_states(parser, deltas: list[str]) -> list[tuple]:
 
 
 def check_reasoning_seed(parser, text: str, request) -> list[dict]:
+    make = parser_factory(parser)
+    if make is None:
+        return [{"check": "skip_fresh", "input": text}]
     findings: list[dict] = []
     markers = _markers(parser)
 
-    def same(a, b) -> bool:
-        return all(_strip(x, markers) == _strip(y, markers) for x, y in zip(a, b, strict=True))
+    def extract(source: str, check: str):
+        try:
+            return make().extract_reasoning(source, request)
+        except Exception as e:  # noqa: BLE001  parser under test; recorded as a finding
+            findings.append({"check": check, "input": source, "error": repr(e)[:300]})
+            return None
 
-    try:
-        base = parser.extract_reasoning(text, request)
-    except Exception as e:  # noqa: BLE001  parser under test; recorded as a finding
-        return [{"check": "raises", "input": text, "error": repr(e)[:300]}]
+    def compare(check: str, source: str, stream: tuple, nonstream: tuple) -> None:
+        if all(_norm(a) == _norm(b) for a, b in zip(stream, nonstream, strict=True)):
+            return
+        same = all(
+            _strip(a, markers) == _strip(b, markers) for a, b in zip(stream, nonstream, strict=True)
+        )
+        findings.append(
+            {
+                "check": f"{check}_markers" if same else check,
+                "input": source,
+                "stream": [_norm(s)[:200] for s in stream],
+                "nonstream": [_norm(s)[:200] for s in nonstream],
+            }
+        )
+
+    base = extract(text, "raises")
+    if base is None:
+        return findings
 
     for check, variant, words in (
         ("R1_prefix", PREFIX + text, PREFIX.strip()),
         ("R1_suffix", text + SUFFIX, SUFFIX.strip()),
     ):
-        try:
-            reasoning, content = parser.extract_reasoning(variant, request)
-        except Exception as e:  # noqa: BLE001  parser under test; recorded as a finding
-            findings.append({"check": f"raises_{check}", "input": variant, "error": repr(e)[:200]})
-            continue
-        if not _kept(words, reasoning, content):
+        result = extract(variant, f"raises_{check}")
+        if result is not None and not _kept(words, *result):
+            reasoning, content = result
             findings.append(
                 {"check": check, "input": variant, "reasoning": reasoning, "content": content}
             )
 
     deltas = token_deltas(parser, text, findings)
-    if deltas is None:
+    if not deltas:
         return findings
-    if not deltas or "_pc_init" not in vars(parser):
-        findings.append({"check": "skip_fresh", "input": text})
-        return findings
-    args, kwargs = parser._pc_init
     try:
-        states = _stream_states(type(parser)(*args, **kwargs), deltas)
+        states = _stream_states(make(), deltas)
     except Exception as e:  # noqa: BLE001  parser under test; recorded as a finding
         findings.append({"check": "raises_stream", "input": text, "error": repr(e)[:300]})
         return findings
 
-    if not same(states[-1], base):
-        findings.append(
-            {
-                "check": "R2_stream",
-                "input": text,
-                "stream": [_norm(s)[:200] for s in states[-1]],
-                "nonstream": [_norm(s)[:200] for s in base],
-            }
-        )
+    joined = "".join(deltas)
+    target = base if joined == text else extract(joined, "raises")
+    if target is not None:
+        compare("R2_stream", text, states[-1], target)
     cuts = list(range(1, len(deltas)))
     if len(cuts) > MAX_CUTS:
         cuts = sorted(random.Random(0).sample(cuts, MAX_CUTS))
     for k in cuts:
         prefix = "".join(deltas[:k])
-        try:
-            cut = parser.extract_reasoning(prefix, request)
-        except Exception as e:  # noqa: BLE001  parser under test; recorded as a finding
-            findings.append({"check": "raises_trunc", "input": prefix, "error": repr(e)[:200]})
-            continue
-        if not same(states[k - 1], cut):
-            findings.append(
-                {
-                    "check": "R2_trunc",
-                    "input": prefix,
-                    "stream": [_norm(s)[:200] for s in states[k - 1]],
-                    "nonstream": [_norm(s)[:200] for s in cut],
-                }
-            )
+        cut = extract(prefix, "raises_trunc")
+        if cut is not None:
+            compare("R2_trunc", prefix, states[k - 1], cut)
     return findings
