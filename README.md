@@ -72,11 +72,11 @@ DeepSeekV31ToolParser  3     44             ...  26                18           
 {"input": "<｜tool▁calls▁begin｜>", "result": {"tools_called": true, "calls": [], "content": null}}
 ```
 
-`PC_MAX_SEEDS` (default 40) limits the recorded outputs per parser. `PC_MAX_CUTS` (default 48) limits the prefixes checked per output.
+`PC_MAX_SEEDS` (default 40) limits the recorded outputs per parser. With `-n`, the report keeps the outputs with the first test ids. `PC_MAX_CUTS` (default 48) limits the prefixes checked per output.
 
 ## Results on vLLM main
 
-Run on `191e5d5` (2026-11-13) with version 0.2.0. The tool-call tests take 2 to 3 minutes with `-n 8`, and the reasoning tests take 5 minutes without `-n`. Each row is a bug that the checks found without any parser-specific setup.
+Run on `191e5d5` (2026-11-13) with version 0.2.0. The tool-call tests take 2 to 3 minutes with `-n 8`, and the reasoning tests take 4 minutes without `-n`. Each row is a bug that the checks found without any parser-specific setup.
 
 | Parser | Bug | Check | Upstream |
 |---|---|---|---|
@@ -99,16 +99,16 @@ When `max_tokens` cuts an output in the middle of a tool call, no complete call 
 |---|---|---|---|
 | `xlam`, `lfm2`, `longcat`, `jamba`, `olmo3`, `phi4_mini_json`, `granite-20b-fc`, `granite4`, `hermes`, `step3`, `internlm`, `llama4_pythonic` | all | 0 | 0 |
 | `gigachat3` | 308 | 6 | 8 |
-| `granite_toolcall_parser` | 14 | 5 | 24 |
+| `granite_toolcall_parser` | 0 | 12 | 19 |
 | `kimi_k2` | 0 | 38 | 0 |
 | `qwen3_coder`, `qwen3_xml` | 0 | 24 | 63 |
 | `step3p5` | 0 | 17 | 19 |
-| `granite` | 0 | 9 | 68 |
+| `granite` | 0 | 9 | 50 |
 | `glm45`, `glm47` | 0 | 3 | 26 |
 | `hy_v3` | 0 | 6 | 27 |
 | `deepseek_v31` | 0 | 18 | 26 |
-| `ernie45` | 4 | 0 | 179 |
-| `deepseek_v3` | 0 | 36 | 212 |
+| `ernie45` | 0 | 14 | 100 |
+| `deepseek_v3` | 0 | 36 | 187 |
 
 `pythonic` has no marker, so its cuts are not in the table. `I2_text` checks them and finds no lost text. Version 0.1.0 also counted cuts before the marker, which raised the first column for the parsers in the lower rows.
 
@@ -127,7 +127,7 @@ PC_REPORT=/tmp/pc.jsonl PC_SEEDS_OUT=/tmp/seeds.jsonl python -m pytest tests/too
 python -m parser_conformance.rust_diff rust/target/debug/examples/parser_diff /tmp/seeds.jsonl
 ```
 
-On `191e5d5`, 113 recorded outputs have a parser in both implementations and a `tokenizer.json` in the local cache. 72 of them parse the same. The other 41 fall into these groups:
+On `191e5d5`, 115 recorded outputs have a parser in both implementations and a `tokenizer.json` in the local cache. 74 of them parse the same. The other 41 fall into these groups:
 
 - 26 are errors on the Rust side.
   - In 7 of them, a cut leaves an unfinished call. The Rust parser's `finish()` reports it, and the frontend drops the unfinished markup. The Python parsers of the same names return the cut output as content. See [vllm#67513](https://github.com/vllm-project/vllm/issues/67513).
@@ -150,14 +150,14 @@ PC_PERF=1 PC_PERF_OUT=/tmp/perf.jsonl PC_MAX_CUTS=1 python -m pytest tests/tool_
     -p parser_conformance.plugin -q
 ```
 
-On `191e5d5`, 19 parsers give ratios from 2.1 to 4.4. Four give more:
+On `191e5d5`, 19 parsers give ratios from 2.7 to 4.5. Four give more:
 
 | `--tool-call-parser` | 256 tokens | 1024 tokens | Ratio |
 |---|---|---|---|
-| `granite` | 105 ms | 973 ms | 9.3 |
-| `jamba` | 39 ms | 347 ms | 9.0 |
-| `granite-20b-fc` | 42 ms | 336 ms | 7.9 |
-| `xlam` | 28 ms | 206 ms | 7.3 |
+| `granite` | 98 ms | 925 ms | 9.5 |
+| `jamba` | 36 ms | 305 ms | 8.6 |
+| `granite-20b-fc` | 42 ms | 328 ms | 7.9 |
+| `xlam` | 23 ms | 161 ms | 7.0 |
 
 The streaming path of `xlam` runs regular expressions and `json.loads` over the whole text for every token. `ernie45` fails the streaming harness's own assertion, so it has no time.
 
@@ -178,8 +178,8 @@ python -m parser_conformance.summarize /tmp/neg.jsonl   # seed above 0, no I1_fl
 - A finding is a candidate, not a verdict. vLLM documents some differences as design:
   - `minicpm5_xml` drops content on purpose when it parses a call, and its tests assert this.
   - The `gemma4` reasoning tests expect different results per mode for output without a start marker.
-  - Incremental streaming cannot take back a call that it started. A call that never closes therefore appears only in streaming. The plugin reports this as `I3_lenient` when the extra calls come last and one of two things holds. The output does not end with a marker, or the arguments of the extra calls are not complete JSON.
-- `I2_text` ignores the markers that it can find. These are special tokens and `*_token` attributes of the parser and its classes. They are also the terminals of parsers built on vLLM's parser engine, and tag-like strings such as `<answer>` in the parser's source. It does not know marker phrases such as Granite's `Here is my thought process:`, which is why the reasoning checks only compare a parser with itself.
+  - Incremental streaming cannot take back a call that it started. A call that never closes therefore appears only in streaming. The plugin reports this as `I3_lenient` when the extra calls come last and no closing marker, such as `</tool_call>`, follows their names. For formats without closing markers, it checks that their arguments are not complete JSON.
+- `I2_text` ignores the markers that it can find. These are special and added tokens with tag characters such as `<`, `|` or `[`, and `*_token` attributes of the parser and its classes. They are also the terminals of parsers built on vLLM's parser engine, and tag-like strings such as `<answer>` in the parser's source. It does not know marker phrases such as Granite's `Here is my thought process:`, which is why the reasoning checks only compare a parser with itself.
 - The plugin compares the streaming state without an end-of-stream flush. Most `R2_trunc` findings are a parser holding back the start of a possible marker at the cut, for example `<th` or Granite's `Here`, which non-streaming returns as content.
 
 ## License
