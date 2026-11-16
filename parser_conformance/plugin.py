@@ -4,9 +4,11 @@ properties.
 
 Run from a vLLM checkout:
 
-    PYTHONPATH=$PWD:<tool dir> PC_REPORT=/tmp/pc.jsonl \
-        python -m pytest tests/tool_parsers tests/reasoning \
+    PC_REPORT=/tmp/pc.jsonl python -m pytest tests/tool_parsers tests/reasoning \\
         -p parser_conformance.plugin -q
+
+With pytest-xdist, each worker checks the seeds it recorded and hands the
+rows to the controller, which writes one report.
 """
 
 from __future__ import annotations
@@ -19,7 +21,10 @@ import time
 import traceback
 from collections import Counter
 
+import pytest
+
 MAX_SEEDS_PER_PARSER = int(os.environ.get("PC_MAX_SEEDS", "40"))
+_KEY = "parser_conformance"
 
 # (method name, family label, package, module suffix, base class path)
 _FAMILIES = [
@@ -40,10 +45,32 @@ _FAMILIES = [
 ]
 
 _SEEDS: list[tuple] = []
-_SEEN: set[tuple[str, str]] = set()
+_SEEN: set[tuple] = set()
 _PER_PARSER: Counter[str] = Counter()
 _IMPORT_ERRORS: list[str] = []
 _STATE = {"depth": 0, "recording": True, "nodeid": None}
+_RESULTS: list[dict] = []  # one entry per process that checked seeds
+
+
+def _tokenizer_name(parser) -> str:
+    name = getattr(parser.model_tokenizer, "name_or_path", None)
+    return name if isinstance(name, str) else type(parser.model_tokenizer).__name__
+
+
+def _request_key(request) -> str:
+    # vLLM gives every request a random request_id, which says nothing about the parse.
+    dump = getattr(type(request), "model_dump_json", None)
+    return dump(request, exclude={"request_id"}) if dump else type(request).__name__
+
+
+def _tools_key(parser) -> str:
+    """The tools that engine parsers take in __init__, e.g. vLLM's Qwen3 coder tests."""
+    args, kwargs = vars(parser).get("_pc_init", ((), {}))
+    tools = args[1] if len(args) > 1 else kwargs.get("tools")
+    if not isinstance(tools, list):
+        return ""
+    dumped = [t.model_dump() if hasattr(t, "model_dump") else repr(t) for t in tools]
+    return json.dumps(dumped, default=str)
 
 
 def _wrap_method(cls, method: str, family: str) -> None:
@@ -57,12 +84,15 @@ def _wrap_method(cls, method: str, family: str) -> None:
             _STATE["recording"]
             and _STATE["depth"] == 0
             and isinstance(model_output, str)
-            and (name, model_output) not in _SEEN
             and _PER_PARSER[name] < MAX_SEEDS_PER_PARSER
         ):
-            _SEEN.add((name, model_output))
-            _PER_PARSER[name] += 1
-            _SEEDS.append((family, self, model_output, request, _STATE["nodeid"]))
+            # The same text can mean something else with another tokenizer, request or tools.
+            where = (_tokenizer_name(self), _request_key(request), _tools_key(self))
+            key = (name, *where, model_output)
+            if key not in _SEEN:
+                _SEEN.add(key)
+                _PER_PARSER[name] += 1
+                _SEEDS.append((family, self, model_output, request, _STATE["nodeid"], key))
         _STATE["depth"] += 1
         try:
             return orig(self, model_output, request, *args, **kwargs)
@@ -75,7 +105,7 @@ def _wrap_method(cls, method: str, family: str) -> None:
 
 def _wrap_init(cls) -> None:
     """Keep the outermost constructor arguments, so the checks can build a
-    fresh parser for streaming exactly as the test built this one."""
+    fresh parser exactly as the test built this one."""
     orig = cls.__dict__.get("__init__")
     if orig is None or getattr(orig, "_pc_wrapped", False):
         return
@@ -113,52 +143,128 @@ def pytest_runtest_setup(item):
     _STATE["nodeid"] = item.nodeid
 
 
-def pytest_sessionfinish(session, exitstatus):
+def _line(row: dict) -> str:
+    return json.dumps(row, ensure_ascii=False, default=str)
+
+
+def _check_seeds() -> dict:
+    """Check the seeds this process recorded. Every value is JSON lines, so
+    that a pytest-xdist worker can send the result to the controller."""
     from parser_conformance.checks import check_seed
     from parser_conformance.reasoning_checks import check_reasoning_seed
 
     checkers = {"tool": check_seed, "reasoning": check_reasoning_seed}
     _STATE["recording"] = False
-    out = os.environ.get("PC_REPORT", "parser_conformance.jsonl")
-    worker = os.environ.get("PYTEST_XDIST_WORKER")
-    if worker:  # one report per pytest-xdist worker
-        out = f"{out}.{worker}"
-    start = time.time()
-    errors: list[str] = []
-    with open(out, "w", encoding="utf-8") as f:
-        for family, parser, text, request, nodeid in _SEEDS:
-            try:
-                findings = checkers[family](parser, text, request)
-            except Exception:  # noqa: BLE001  re-raised below, after the report is written
-                errors.append(f"{type(parser).__name__} {nodeid}\n{traceback.format_exc()}")
-                continue
-            for finding in findings:
-                finding.update(family=family, parser=type(parser).__name__, nodeid=nodeid)
-                f.write(json.dumps(finding, ensure_ascii=False, default=str) + "\n")
-    print(
-        f"\n[parser-conformance] {len(_SEEDS)} seeds from {len(_PER_PARSER)} parsers "
-        f"checked in {time.time() - start:.0f}s -> {out}"
-    )
-    for line in _IMPORT_ERRORS:
-        print(f"[parser-conformance] not imported: {line}")
-    seeds_out = os.environ.get("PC_SEEDS_OUT")
-    if seeds_out:
-        from parser_conformance.export import export_seeds
+    report: dict[str, list[str]] = {}  # seed key -> rows
+    errors = []
+    for family, parser, text, request, nodeid, key in _SEEDS:
+        where = {"family": family, "parser": type(parser).__name__, "nodeid": nodeid}
+        try:
+            findings = checkers[family](parser, text, request)
+        except Exception as e:  # noqa: BLE001  fails the run in pytest_sessionfinish
+            errors.append(f"{where['parser']} {nodeid}\n{traceback.format_exc()}")
+            findings = [{"check": "harness_error", "input": text, "error": repr(e)[:300]}]
+        rows = [{"check": "seed", "input": text}, *findings]
+        report[_line(key)] = [_line({**row, **where}) for row in rows]
+    seeds = [seed[:5] for seed in _SEEDS]
+    result = {"report": report, "errors": errors, "import_errors": _IMPORT_ERRORS}
+    if os.environ.get("PC_SEEDS_OUT"):
+        from parser_conformance.export import export_rows
 
-        if worker:
-            seeds_out = f"{seeds_out}.{worker}"
-        count = export_seeds(_SEEDS, seeds_out)
-        print(f"[parser-conformance] exported {count} tool seeds -> {seeds_out}")
+        tool_keys = [_line(seed[5]) for seed in _SEEDS if seed[0] == "tool"]
+        result["seeds"] = dict(zip(tool_keys, map(_line, export_rows(seeds)), strict=True))
     if os.environ.get("PC_PERF"):
         from parser_conformance.perf import run_perf
 
+        result["perf"] = [_line(row) for row in run_perf(seeds)]
+    return result
+
+
+@pytest.hookimpl(optionalhook=True)
+def pytest_testnodedown(node, error):
+    result = getattr(node, "workeroutput", {}).get(_KEY)
+    if result is None:
+        worker = node.gateway.id
+        result = {"report": {}, "errors": [f"worker {worker} sent no results: {error}"]}
+    _RESULTS.append(result)
+
+
+def _nodeid(lines: list[str]) -> str:
+    return json.loads(lines[0])["nodeid"] or ""
+
+
+def _unique_seeds(lines: list[str]) -> list[str]:
+    """One exported row per input, whichever test recorded it."""
+    rows: dict[str, str] = {}
+    for line in lines:
+        row = json.loads(line)
+        row.pop("nodeid")
+        rows.setdefault(_line(row), line)
+    return list(rows.values())
+
+
+def _write(path: str, lines: list[str]) -> int:
+    with open(path, "w", encoding="utf-8") as f:
+        f.writelines(line + "\n" for line in lines)
+    return len(lines)
+
+
+def _longest_per_parser(lines: list[str]) -> list[str]:
+    best: dict[str, dict] = {}
+    for row in map(json.loads, lines):
+        if row["parser"] not in best or row["chars"] > best[row["parser"]]["chars"]:
+            best[row["parser"]] = row
+    rows = sorted(best.values(), key=lambda r: -r.get("ratio", 0))
+    return [_line(row) for row in rows]
+
+
+def pytest_sessionfinish(session, exitstatus):
+    config = session.config
+    if hasattr(config, "workerinput"):  # a pytest-xdist worker
+        config.workeroutput[_KEY] = _check_seeds()
+        return
+    took = ""
+    if config.pluginmanager.getplugin("dsession") is None:  # no workers
+        start = time.time()
+        _RESULTS.append(_check_seeds())
+        took = f" in {time.time() - start:.0f}s"
+
+    def merged(key: str) -> list[str]:
+        return [line for result in _RESULTS for line in result.get(key, [])]
+
+    # Two workers can record the same seed. Keep the rows of the test whose id
+    # sorts first, so that the choice does not depend on which worker ran it.
+    groups: dict[str, list[str]] = {}
+    for result in _RESULTS:
+        for key, lines in result["report"].items():
+            if key not in groups or _nodeid(lines) < _nodeid(groups[key]):
+                groups[key] = lines
+    # Each worker records up to PC_MAX_SEEDS per parser. Keep that many in all,
+    # the first by test id.
+    per_parser: Counter[str] = Counter()
+    kept = []
+    for key in sorted(groups, key=lambda k: (_nodeid(groups[k]), k)):
+        parser = json.loads(groups[key][0])["parser"]
+        if per_parser[parser] < MAX_SEEDS_PER_PARSER:
+            per_parser[parser] += 1
+            kept.append(key)
+    out = os.environ.get("PC_REPORT", "parser_conformance.jsonl")
+    _write(out, [line for key in kept for line in groups[key]])
+    seeds = len(kept)
+    print(f"\n[parser-conformance] {seeds} seeds checked{took} -> {out}")
+    for line in sorted(set(merged("import_errors"))):
+        print(f"[parser-conformance] not imported: {line}")
+    seeds_out = os.environ.get("PC_SEEDS_OUT")
+    if seeds_out:
+        exported = {k: v for result in _RESULTS for k, v in result.get("seeds", {}).items()}
+        count = _write(seeds_out, _unique_seeds([exported[k] for k in kept if k in exported]))
+        print(f"[parser-conformance] exported {count} tool seeds -> {seeds_out}")
+    if os.environ.get("PC_PERF"):
         perf_out = os.environ.get("PC_PERF_OUT", "parser_conformance_perf.jsonl")
-        if worker:
-            perf_out = f"{perf_out}.{worker}"
-        with open(perf_out, "w", encoding="utf-8") as f:
-            for row in run_perf(_SEEDS):
-                f.write(json.dumps(row) + "\n")
+        _write(perf_out, _longest_per_parser(merged("perf")))
         print(f"[parser-conformance] streaming cost -> {perf_out}")
+    errors = merged("errors")
     if errors:
         print("\n".join(errors))
-        raise RuntimeError(f"parser-conformance: {len(errors)} seeds broke the harness")
+        print(f"[parser-conformance] {len(errors)} seeds broke the checks")
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED

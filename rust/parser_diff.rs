@@ -13,6 +13,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use serde_json::{Value, json};
+use thiserror_ext::AsReport as _;
 use vllm_chat::ToolParserFactory;
 use vllm_parser::tool::{Tool, ToolParserOutput};
 use vllm_tokenizer::{DynTokenizer, HuggingFaceTokenizer};
@@ -40,16 +41,16 @@ fn parse(row: &Value, tokenizer: DynTokenizer) -> Result<ToolParserOutput, Strin
     let text = row["text"].as_str().ok_or("missing text")?;
     let mut parser = ToolParserFactory::global()
         .create(name, &tools(&row["tools"]), tokenizer.clone())
-        .map_err(|e| format!("create: {e}"))?;
-    let ids = tokenizer.encode(text, false).map_err(|e| format!("encode: {e}"))?;
+        .map_err(|e| format!("create: {}", e.to_report_string()))?;
+    let ids = tokenizer.encode(text, false).map_err(|e| format!("encode: {}", e.to_report_string()))?;
     let mut decoder = tokenizer.create_decode_stream(&[], false, 0);
     for &id in &ids {
-        decoder.push_token(id).map_err(|e| format!("decode: {e}"))?;
+        decoder.push_token(id).map_err(|e| format!("decode: {}", e.to_report_string()))?;
     }
-    let decoded = decoder.flush(None).map_err(|e| format!("decode: {e}"))?.1;
+    let decoded = decoder.flush(None).map_err(|e| format!("decode: {}", e.to_report_string()))?.1;
     let mut output = ToolParserOutput::default();
-    parser.parse_into(decoded, &mut output).map_err(|e| format!("parse: {e}"))?;
-    output.append(parser.finish().map_err(|e| format!("finish: {e}"))?);
+    parser.parse_into(decoded, &mut output).map_err(|e| format!("parse: {}", e.to_report_string()))?;
+    output.append(parser.finish().map_err(|e| format!("finish: {}", e.to_report_string()))?);
     Ok(output.coalesce())
 }
 
@@ -59,13 +60,17 @@ fn main() {
     for line in io::stdin().lock().lines() {
         let row: Value = serde_json::from_str(&line.expect("read stdin")).expect("JSON line");
         let file = row["tokenizer_file"].as_str().expect("tokenizer_file").to_string();
-        let tokenizer = tokenizers
-            .entry(file.clone())
-            .or_insert_with(|| {
-                Arc::new(HuggingFaceTokenizer::new(Path::new(&file)).expect("load tokenizer"))
-            })
-            .clone();
-        let result = match parse(&row, tokenizer) {
+        let tokenizer = match tokenizers.get(&file) {
+            Some(tokenizer) => Ok(tokenizer.clone()),
+            None => HuggingFaceTokenizer::new(Path::new(&file))
+                .map(|t| {
+                    let t: DynTokenizer = Arc::new(t);
+                    tokenizers.insert(file.clone(), t.clone());
+                    t
+                })
+                .map_err(|e| format!("tokenizer: {}", e.to_report_string())),
+        };
+        let result = match tokenizer.and_then(|tokenizer| parse(&row, tokenizer)) {
             Ok(output) => json!({
                 "content": output.normal_text(),
                 "calls": output

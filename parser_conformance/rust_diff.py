@@ -34,7 +34,17 @@ def _tokenizer_file(name: str | None) -> str | None:
 
 
 def _key(calls: list[dict]) -> list[tuple[str, str]]:
-    return [(c["name"] or "", _canonical(c["arguments"] or "{}")) for c in calls]
+    return [(c["name"] or "", _canonical(c["arguments"])) for c in calls]
+
+
+def classify(python: dict, rust: dict) -> str:
+    if "error" in rust:
+        return "not in Rust" if "is not registered" in rust["error"] else "Rust error"
+    if _key(rust["calls"]) != _key(python["calls"]):
+        return "calls differ"
+    if (rust["content"] or "").strip() != (python["content"] or "").strip():
+        return "content differs"
+    return "same"
 
 
 def main(binary: str, paths: list[str]) -> None:
@@ -44,6 +54,9 @@ def main(binary: str, paths: list[str]) -> None:
         with open(path, encoding="utf-8") as f:
             for line in f:
                 seed = json.loads(line)
+                if "error" in seed["python"]:
+                    skipped["Python parser raised"] += 1
+                    continue
                 tokenizer_file = _tokenizer_file(seed["tokenizer"])
                 if tokenizer_file is None:
                     skipped["no tokenizer.json in cache"] += 1
@@ -62,7 +75,7 @@ def main(binary: str, paths: list[str]) -> None:
     run = subprocess.run(
         [binary],
         input="".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows),
-        capture_output=True,
+        stdout=subprocess.PIPE,
         text=True,
         encoding="utf-8",
         check=True,
@@ -71,27 +84,12 @@ def main(binary: str, paths: list[str]) -> None:
     counts: Counter[tuple[str, str]] = Counter()
     for reply in replies:
         seed, name, rust = seeds[reply["id"]], reply["parser"], reply["rust"]
-        if "error" in rust:
-            kind = "not in Rust" if rust["error"].startswith("create") else "Rust error"
-            counts[(name, kind)] += 1
-            if kind == "Rust error":
-                print(
-                    json.dumps({"parser": name, "text": seed["text"], **rust}, ensure_ascii=False)
-                )
+        kind = classify(seed["python"], rust)
+        counts[(name, kind)] += 1
+        if kind in ("same", "not in Rust"):
             continue
-        python = seed["python"]
-        same_calls = _key(rust["calls"]) == _key(python["calls"])
-        same_content = (rust["content"] or "").strip() == (python["content"] or "").strip()
-        if same_calls and same_content:
-            counts[(name, "same")] += 1
-            continue
-        counts[(name, "calls differ" if not same_calls else "content differs")] += 1
-        print(
-            json.dumps(
-                {"parser": name, "text": seed["text"], "rust": rust, "python": python},
-                ensure_ascii=False,
-            )
-        )
+        detail = {"parser": name, "text": seed["text"], "rust": rust, "python": seed["python"]}
+        print(json.dumps(detail, ensure_ascii=False))
     for (name, kind), n in sorted(counts.items()):
         print(f"{name}\t{kind}\t{n}", file=sys.stderr)
     for reason, n in skipped.items():
