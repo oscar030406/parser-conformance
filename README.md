@@ -93,26 +93,28 @@ The two fixes linked above remove their findings. On the fix branches, `I1_flag`
 
 ## Truncated tool calls
 
-When `max_tokens` cuts an output in the middle of a tool call, no complete call remains. vLLM's parsers then disagree on what non-streaming returns as `content`. The plugin records this as `policy_*` rows instead of failures. A cut counts as inside a call when it contains a marker of the parser and the full output has a call. Each count below is a number of cut positions on `191e5d5`:
+When `max_tokens` cuts an output in the middle of a tool call, no complete call remains. vLLM's parsers then disagree on the response. The plugin records each such cut as a `policy_*` row instead of a failure. A cut counts as inside a call when it contains a marker of the parser and the full output has a call.
 
-| `--tool-call-parser` | keeps the cut output | keeps only the text before the call | returns no content |
-|---|---|---|---|
-| `xlam`, `lfm2`, `longcat`, `jamba`, `olmo3`, `phi4_mini_json`, `granite-20b-fc`, `granite4`, `hermes`, `step3`, `internlm`, `llama4_pythonic` | all | 0 | 0 |
-| `gigachat3` | 308 | 6 | 8 |
-| `granite_toolcall_parser` | 0 | 12 | 19 |
-| `kimi_k2` | 0 | 38 | 0 |
-| `qwen3_coder`, `qwen3_xml` | 0 | 24 | 63 |
-| `step3p5` | 0 | 17 | 19 |
-| `granite` | 0 | 9 | 50 |
-| `glm45`, `glm47` | 0 | 3 | 26 |
-| `hy_v3` | 0 | 6 | 27 |
-| `deepseek_v31` | 0 | 18 | 26 |
-| `ernie45` | 0 | 14 | 100 |
-| `deepseek_v3` | 0 | 36 | 187 |
+Each row has two results. The check name gives what `extract_tool_calls` returns: `keeps_text`, `drops_call` (only the text before the call), `drops_all` (no content) or `ghost_call` (a call that the full output does not have). The `served_*` fields give what the server returns: vLLM's `Parser.parse` with only this tool parser. The two can differ. When `tools_called` is false, `Parser.parse` returns the raw output as content for parsers that are not built on vLLM's parser engine.
 
-`pythonic` has no marker, so its cuts are not in the table. `I2_text` checks them and finds no lost text. Version 0.1.0 also counted cuts before the marker, which raised the first column for the parsers in the lower rows.
+The suffix of the check name gives the cut position. `@opener` cuts stop in the markup before the function name. `@call` cuts reach the name.
 
-Cuts that match none of the three cases (`policy_other`) are not counted. Which behavior vLLM intends is the open question in [vllm#67513](https://github.com/vllm-project/vllm/issues/67513).
+What the server returns, on `0fda86a` (2026-11-20), as cut positions:
+
+| `--tool-call-parser` | cut before the name | cut at or after the name |
+|---|---|---|
+| `xlam`, `lfm2`, `longcat`, `jamba`, `olmo3`, `phi4_mini_json`, `granite-20b-fc`, `granite4`, `hermes`, `step3`, `internlm`, `llama4_pythonic`, `gigachat3`, `deepseek_v3`, `deepseek_v31`, `ernie45` | keeps the cut output | keeps the cut output |
+| `kimi_k2` | drops the cut call (29) | drops the cut call (279) |
+| `granite` | drops the cut call (43) | drops the cut call (166) |
+| `granite_toolcall_parser` | drops the cut call (31) | drops the cut call (160) |
+| `glm45`, `glm47` | drops the cut call (9) | returns a call in 38 of 65 |
+| `qwen3_coder`, `qwen3_xml` | drops the cut call (87) | returns a call in 147 of 673, 6 of them with a cut name |
+| `hy_v3` | drops the cut call (16) | returns a call in 73 of 90 |
+| `step3p5` | drops the cut call (36) | returns a call in 309 of 395, 20 of them with a cut name |
+
+"Drops the cut call" keeps the text before the call. A returned call has the arguments that the cut output holds, for example `{}` for `<function=get`, and the server reports `finish_reason` `length`. The DeepSeek v32, v4 and v41 tests use a stand-in tokenizer, so their cuts are not in the table.
+
+`pythonic` has no marker, so its cuts are not in the table. `I2_text` checks them and finds no lost text. Which behavior vLLM intends is the open question in [vllm#67513](https://github.com/vllm-project/vllm/issues/67513).
 
 ## Comparing with vLLM's Rust frontend
 

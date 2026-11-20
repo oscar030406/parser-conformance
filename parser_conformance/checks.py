@@ -153,13 +153,76 @@ def _outcome(info) -> tuple:
     return (_calls_key(info.tool_calls), _norm(info.content))
 
 
-def _cut_policy(prefix: str, content: str | None, markers: list[str]) -> dict:
+def _name_starts(text: str, calls, markers: list[str]) -> list[int] | None:
+    """Where each call's name starts in the output, or None when a name is not found.
+
+    A name starts with the identifier around it: Kimi K2 writes
+    `functions.get_weather:0` for the call `get_weather`.
+    """
+    starts = [i for i in (text.find(m) for m in markers) if i >= 0]
+    pos, found = min(starts) if starts else 0, []
+    for call in calls:
+        at = text.find(call.function.name, pos)
+        if at < 0:
+            return None
+        start = at
+        while start > pos and (text[start - 1].isalnum() or text[start - 1] in "_.:-"):
+            start -= 1
+        found.append(start)
+        pos = at + len(call.function.name)
+    return found
+
+
+def _cut_position(prefix: str, returned, base_calls, name_starts) -> str:
+    """ "call" when the cut reaches the name of the first call not returned complete.
+
+    "opener" when it stops before that name, inside the markup that opens the
+    call. vLLM's DSML parsers treat the two positions differently (vllm#66474).
+    """
+    if name_starts is None:
+        return "unknown"
+    done = 0
+    while done < min(len(returned), len(base_calls)) and returned[done] == base_calls[done]:
+        done += 1
+    if done >= len(name_starts):
+        return "unknown"
+    return "call" if len(prefix) > name_starts[done] else "opener"
+
+
+def _served(parser, source: str, request) -> dict | None:
+    """What the server returns for source: vLLM's Parser.parse with only this tool parser.
+
+    Parser.parse decides the response from tools_called and, for legacy
+    parsers, returns the raw output as content when no call is found. So it
+    can differ from extract_tool_calls. None when vLLM has no Parser.parse.
+    """
+    try:
+        from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+        from vllm.parser.abstract_parser import DelegatingParser
+    except ImportError:
+        return None
+    served = type("Served", (DelegatingParser,), {"tool_parser_cls": None})(
+        parser.model_tokenizer, None
+    )
+    served._tool_parser = parser
+    served._engine_based = parser.engine_based_streaming
+    if not isinstance(request, ChatCompletionRequest):
+        request = ChatCompletionRequest(model="m", messages=[{"role": "user", "content": "hi"}])
+    _, content, calls = served.parse(source, request, enable_auto_tools=True)
+    return {
+        "served_content": content,
+        "served_calls": [(c.name, _canonical(c.arguments)) for c in calls or []],
+    }
+
+
+def _cut_policy(prefix: str, content: str | None, markers: list[str], position: str) -> dict:
     """Record what non-streaming returns when a cut leaves no complete call.
 
     This is an observation, not a pass or fail: vLLM's parsers disagree here.
     "policy_keeps_text" returns the cut output as content, with or without its
     markers. "policy_drops_call" keeps only the text before the first marker,
-    and "policy_drops_all" returns no content.
+    and "policy_drops_all" returns no content. The suffix is the cut position
+    from `_cut_position`.
     """
     starts = [i for i in (prefix.find(m) for m in markers) if i >= 0]
     before = prefix[: min(starts)] if starts else prefix
@@ -173,7 +236,7 @@ def _cut_policy(prefix: str, content: str | None, markers: list[str]) -> dict:
         kind = "keeps_text"  # e.g. Llama 4 returns "[" for "<|python_start|>["
     else:
         kind = "other"
-    return {"check": f"policy_{kind}", "input": prefix, "content": content}
+    return {"check": f"policy_{kind}@{position}", "input": prefix, "content": content}
 
 
 def token_pieces(tokenizer, text: str) -> list[str]:
@@ -308,15 +371,48 @@ def check_seed(parser, text: str, request) -> list[dict]:
     cuts = list(range(1, len(deltas))) if deltas else []
     if len(cuts) > MAX_CUTS:
         cuts = sorted(random.Random(0).sample(cuts, MAX_CUTS))
+
+    def served(source: str) -> dict:
+        """The server's response, with the same kinds as the policy rows, or "call"."""
+        try:
+            got = _served(make(), source, request)
+        except Exception as e:  # noqa: BLE001  parser under test; recorded with the row
+            return {"served_error": repr(e)[:300]}
+        if got is None:
+            return {}
+        policy = _cut_policy(source, got["served_content"], call_markers, "")["check"]
+        kind = "call" if got["served_calls"] else policy[len("policy_") : -1]
+        return {**got, "served_kind": kind}
+
+    base_calls = _calls_key(base.tool_calls)
+    name_starts = _name_starts(text, base.tool_calls or [], call_markers)
     for k in cuts:
         prefix = "".join(deltas[:k])
         info = extract(prefix, "raises_trunc")
         if info is None:
             continue
-        if base.tool_calls and not info.tool_calls and any(m in prefix for m in call_markers):
+        returned = _calls_key(info.tool_calls)
+        in_call = base.tool_calls and any(m in prefix for m in call_markers)
+        if in_call and not info.tool_calls:
             # A cut inside a call: vLLM's parsers disagree on the content (vllm#67513).
+            position = _cut_position(prefix, returned, base_calls, name_starts)
             judge(prefix, info, "_trunc", content=False)
-            findings.append(_cut_policy(prefix, info.content, call_markers))
+            row = _cut_policy(prefix, info.content, call_markers, position)
+            findings.append({**row, **served(prefix)})
+        elif in_call and returned[: len(base_calls)] != base_calls[: len(returned)]:
+            # A call that the full output does not have, e.g. a cut name with empty arguments.
+            position = _cut_position(prefix, returned, base_calls, name_starts)
+            judge(prefix, info, "_trunc")
+            names = {name for name, _ in base_calls}
+            findings.append(
+                {
+                    "check": f"policy_ghost_call@{position}",
+                    "input": prefix,
+                    "calls": returned,
+                    "cut_name": any(name not in names for name, _ in returned),
+                    **served(prefix),
+                }
+            )
         else:
             judge(prefix, info, "_trunc")
 

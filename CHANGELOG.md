@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-20
+
+### Added
+
+- Each `policy_*` row has the cut position as a suffix: `@opener` for a cut before the function name, `@call` for a cut at or after it.
+- A cut that returns a call the full output does not have is a `policy_ghost_call` row. Its `cut_name` field tells whether the name is cut.
+- The `served_content`, `served_calls` and `served_kind` fields give what vLLM's `Parser.parse` returns for the cut, the path that serves non-streaming chat. For parsers that are not built on vLLM's parser engine, it returns the raw output when `tools_called` is false, so it can differ from `extract_tool_calls`.
+
 ## [0.2.0] - 2026-11-16
 
 ### Fixed
