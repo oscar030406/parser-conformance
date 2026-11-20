@@ -1,10 +1,12 @@
 """The tool-call checks on the demo parsers in fake_vllm/vllm/tool_parsers/demo_tool_parser.py."""
 
+from types import SimpleNamespace
+
 import pytest
 from vllm.fake_tokenizer import ByteTokenizer
 from vllm.tool_parsers import demo_tool_parser as demo
 
-from parser_conformance.checks import _markers, check_seed
+from parser_conformance.checks import _markers, _name_starts, check_seed
 
 TOKENIZER = ByteTokenizer()
 CALL = '<tool_call>{"name": "f", "arguments": {"a": 1}}</tool_call>'
@@ -79,8 +81,25 @@ def test_empty_streamed_arguments():
 
 def test_cut_inside_a_call_is_an_observation():
     found = checks(demo.DropsCutCallToolParser(TOKENIZER), f"Hi {CALL}")
-    assert "policy_drops_call" in found
+    assert {"policy_drops_call@opener", "policy_drops_call@call"} <= found
     assert "I2_text_trunc" not in found
+
+
+def test_cut_position_is_relative_to_the_call_name():
+    rows = check_seed(demo.DropsCutCallToolParser(TOKENIZER), f"Hi {CALL}", None)
+    position = {
+        r["input"]: r["check"].split("@")[1] for r in rows if r["check"].startswith("policy_")
+    }
+    assert position['Hi <tool_call>{"name": "'] == "opener"
+    assert position['Hi <tool_call>{"name": "f'] == "call"
+
+
+def test_cut_call_returned_with_empty_arguments_is_a_ghost_call():
+    rows = check_seed(demo.GhostCallToolParser(TOKENIZER), f"Hi {CALL}", None)
+    ghosts = {r["input"]: r for r in rows if r["check"] == "policy_ghost_call@call"}
+    ghost = ghosts['Hi <tool_call>{"name": "f", "arguments": {"a": ']
+    assert ghost["calls"] == [("f", "{}")]
+    assert not ghost["cut_name"]
 
 
 def test_cut_before_the_call_is_still_checked():
@@ -111,3 +130,10 @@ class DigitVocabTokenizer(ByteTokenizer):
 
 def test_lost_digits_are_lost_text():
     assert "7" not in _markers(demo.DemoToolParser(DigitVocabTokenizer()))
+
+
+def test_name_starts_with_the_identifier_around_it():
+    # Kimi K2 writes the call get_weather as functions.get_weather:0.
+    text = "Hi <|tool_call_begin|>functions.get_weather:0 <|tool_call_argument_begin|>{}"
+    call = SimpleNamespace(function=SimpleNamespace(name="get_weather"))
+    assert _name_starts(text, [call], ["<|tool_call_begin|>"]) == [text.index("functions")]

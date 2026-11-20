@@ -119,6 +119,17 @@ class DropsCutCallToolParser(DemoToolParser):
         return _info(calls, outside)
 
 
+class GhostCallToolParser(DemoToolParser):
+    """A call that does not close but has its whole name becomes a call with no arguments."""
+
+    def extract_tool_calls(self, model_output, request):
+        calls, outside, tail = parse(model_output)
+        name = re.search(r'"name": "(\w+)"', tail)
+        if name is None:
+            return _info(calls, outside + tail)
+        return _info([*calls, ToolCall(FunctionCall(name.group(1), "{}"))], outside)
+
+
 class NoContentToolParser(DemoToolParser):
     """Returns no content when it finds no call, so plain text is lost."""
 
